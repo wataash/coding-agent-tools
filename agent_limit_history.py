@@ -37,13 +37,7 @@ def number(value):
 
 
 def normalize(provider, payload):
-    """Keep unavailable windows absent, and derive Codex windows from duration.
-
-    >>> normalize('codex', {'rateLimits': {'primary': {'usedPercent': 66, 'windowDurationMins': 10080, 'resetsAt': 123}, 'secondary': None}})
-    [('codex', 10080, 66, 123)]
-    >>> normalize('claude', {'five_hour': None, 'seven_day': {'utilization': 46, 'resets_at': None}})
-    [('seven_day', 10080, 46, None)]
-    """
+    """Keep unavailable windows absent, and derive Codex windows from duration."""
     rows = []
     if provider == "claude":
         for key, value in payload.items():

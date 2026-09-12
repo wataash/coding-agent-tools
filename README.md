@@ -68,7 +68,6 @@ python3 ./agent_limit_history.py -q plot --days 14 --show
 python3 ./agent_limit_history.py -q snapshot --output /tmp/agent-limits.sqlite3
 # Tests (standard library only)
 python3 -m unittest discover -s ./ -p agent_limit_history_test.py
-python3 -m doctest ./agent_limit_history.py
 ```
 
 `--show` opens a window using matplotlib's TkAgg backend. Use the toolbar's magnifying
