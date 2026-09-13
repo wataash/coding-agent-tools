@@ -41,6 +41,9 @@ def normalize(provider, payload):
     rows = []
     if provider == "claude":
         for key, value in payload.items():
+            # Weekly breakdown metadata is not a utilization window.
+            if key == "seven_day_breakdown":
+                continue
             if not (key == "five_hour" or key.startswith("seven_day")) or value is None:
                 continue
             used = number(value["utilization"])

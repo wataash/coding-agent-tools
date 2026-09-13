@@ -46,6 +46,19 @@ class LimitHistoryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             history.normalize("claude", {"five_hour": {"utilization": float("nan")}})
 
+    def test_claude_weekly_breakdown_is_not_a_window(self):
+        payload = {"five_hour": {"utilization": 12},
+                   "seven_day": {"utilization": 34},
+                   "seven_day_sonnet": {"utilization": 56},
+                   "seven_day_breakdown": {"as_of": "example", "rows": [], "window_started_at": "example"}}
+        self.assertEqual(history.normalize("claude", payload), [
+            ("five_hour", 300, 12, None), ("seven_day", 10080, 34, None),
+            ("seven_day_sonnet", 10080, 56, None)])
+        with self.assertRaises(ValueError):
+            history.normalize("claude", {"seven_day_breakdown": payload["seven_day_breakdown"]})
+        with self.assertRaises(KeyError):
+            history.normalize("claude", {"seven_day": {}})
+
     def test_failure_is_recorded_and_next_provider_runs(self):
         with tempfile.TemporaryDirectory() as temp:
             db = Path(temp) / "history.sqlite3"
