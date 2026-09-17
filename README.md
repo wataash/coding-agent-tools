@@ -1,90 +1,199 @@
-# agent_limit_history
+# coding-agent-tools
 
-Periodically fetch Claude Code / Codex subscription usage and store it in SQLite.
-`collect` uses the Python standard library; `plot` uses matplotlib.
-Usage is not estimated from token counts or equivalent API costs.
+Inspect running Claude Code / Codex sessions, wait for agents to finish, analyze
+Claude Code transcript usage, and record subscription usage limits. The repository
+provides these Python command-line tools:
 
-![Claude and Codex subscription usage over time, with five-hour and weekly limits](assets/limits.webp)
+- `agent_activity.py` reports sessions that are currently working.
+- `waitall.py` waits until agents and load average are idle.
+- `agent_limit_history.py` stores usage observations in SQLite and plots them.
+- `claude_turn_usage.py` summarizes tokens and cost by turn or session.
+- `claude_plot_usage.py` plots token usage and cost over a session.
+
+None of the tools starts inference turns. They use only the Python standard
+library except that plotting uses matplotlib.
 
 ## Requirements
 
 - Python 3.10 or later.
-- Claude Code with existing OAuth credentials in `~/.claude/.credentials.json`
-  and/or a signed-in Codex CLI available as `codex` on PATH.
-- matplotlib for plotting; tkinter for `--show`.
+- Claude Code and/or Codex CLI with existing local authentication.
+- Linux with access to the host's `/proc/` for Codex activity detection.
+- matplotlib for plotting limit history; tkinter for `--show`.
 
-Run commands from the repository directory. Collection uses the current Python
-interpreter for Claude and launches `codex app-server` directly for Codex.
-Use `--providers claude` or `--providers codex` to collect just one service.
+Run commands from the repository directory. Use the provider-selection options
+when only one CLI is available.
+
+## Running-session activity
+
+```sh
+# fish / bash
+python3 agent_activity.py
+python3 agent_activity.py --no-claude
+python3 agent_activity.py --no-codex
+python3 agent_activity.py -n
+python3 agent_activity.py --command-timeout 20 -q
+```
+
+The command prints one JSON object with `codex` and `claude` arrays containing
+running entries. A disabled provider has an empty array. Diagnostics go to stderr.
+Exit status is 0 on successful inspection, whether or not agents are running;
+inspection failures return 1 without printing a misleading empty result.
+`-n` / `--dry_run` prints inspection commands without reading sessions or running
+commands. It does not enumerate local databases or rollout files. `-q` lowers
+verbosity.
+
+### Python API
+
+Place `agent_activity.py` alongside the caller or add this repository to
+`PYTHONPATH`. The module does not configure logging when imported.
+
+```python
+import agent_activity
+
+codex = agent_activity.read_codex_running(command_timeout=10.0)
+claude = agent_activity.read_claude_running(command_timeout=10.0)
+commands = agent_activity.inspection_commands(codex=True, claude=False)
+```
+
+The readers return lists of entry dictionaries. Codex entries have an `id` and
+status; local rollout entries also contain `pid`, `processUuid`, `cwd`, `name`,
+and `detection='rollout'`. Claude entries preserve the CLI's fields. Callers
+should use `.get()` for optional display fields. Protocol and database errors
+raise exceptions instead of indicating that all work is finished.
+
+### Activity detection
+
+- Codex CLI: map live Codex PIDs to thread IDs using `logs_2.sqlite`. Read each
+  thread's `rollout_path` from `state_5.sqlite`, then scan its JSONL history from
+  the end. `task_started` means running; `task_complete` and `turn_aborted` stop it.
+  Incomplete appended JSONL records are ignored.
+- Codex daemon: when its control socket exists, query `thread/list` through
+  `codex app-server proxy`. Active sessions waiting on approval or user input are
+  excluded. Results are deduplicated by thread ID.
+- Claude: query `claude agents --json`. Background entries require
+  `state=working`; interactive entries require `status=busy`. Older live entries
+  without activity fields are conservatively considered running.
+
+Codex data is read from `CODEX_HOME`, defaulting to `~/.codex/`. SQLite databases
+are opened read-only. Codex CLI rollout detection includes the interval between
+task start and task end, including approval waits. PID namespaces that hide host
+processes are unsuitable for inspection. Internal database schemas, rollout
+events, and CLI protocols may change and require updates. Session contents and
+credentials are not bundled or copied into this repository.
+
+Load average checks, repeated polling, keyboard input, and terminal presentation
+belong to callers such as `waitall.py`, not this module.
+
+## Waiting for idle agents
+
+`waitall.py` repeatedly checks Claude Code, Codex, and Linux load average, then
+exits when every enabled condition is idle. Pressing a key triggers an immediate
+check. See [waitall.md](waitall.md) for options and detection details.
+
+```sh
+# fish / bash
+python3 ./waitall.py
+python3 ./waitall.py --interval 30 --threshold 0.5 --loadavg-minutes 5
+python3 ./waitall.py --no-claude --no-loadavg
+```
+
+## Claude transcript usage
+
+`claude_turn_usage.py` summarizes token usage and estimated USD cost from a
+Claude Code transcript. `claude_plot_usage.py` uses the same parsing and pricing
+to plot per-turn and cumulative usage. Rates are hard-coded estimates; unknown
+models are clearly marked. Subagent transcripts are separate and are not folded
+into their parent transcript automatically.
+
+```sh
+# fish / bash
+python3 ./claude_turn_usage.py ~/.claude/projects/<project>/<session>.jsonl
+python3 ./claude_turn_usage.py --both --by_model <session>.jsonl
+python3 ./claude_plot_usage.py <session-id>
+```
+
+See [claude_turn_usage.md](claude_turn_usage.md),
+[claude_plot_usage.md](claude_plot_usage.md), and
+[claude_long_context_pricing.md](claude_long_context_pricing.md) for details.
+
+## Subscription limit history
+
+Periodically fetch Claude Code / Codex subscription usage and store it in SQLite.
+Usage is not estimated from token counts or equivalent API costs.
+
+![Claude and Codex subscription usage over time, with five-hour and weekly limits](assets/limits.webp)
+
+Collection uses the current Python interpreter for Claude and launches
+`codex app-server` directly for Codex. Use `--providers claude` or
+`--providers codex` to collect just one service.
 
 To run collectors through a sandbox or another launcher, set `--claude-command`
 and/or `--codex-command`. Each value is split with Python's `shlex.split` and
-executed without a shell; quote paths containing spaces inside the value.
-The Claude command must emit one JSON object with `observed_at` (UTC epoch seconds)
-and `windows` (arrays of `[bucket, window_minutes, used_percent, resets_at]`),
-or an `error` string on failure. The built-in `_fetch-claude` command implements
+executed without a shell; quote paths containing spaces inside the value. The
+Claude command must emit one JSON object with `observed_at` (UTC epoch seconds)
+and `windows` (arrays of `[bucket, window_minutes, used_percent, resets_at]`), or
+an `error` string on failure. The built-in `_fetch-claude` command implements
 this format. The Codex command must start an app-server speaking the stdio RPC
 protocol. `collect -n` prints commands without executing them or creating the DB.
 
-## Collection and storage
+### Collection and storage
 
-- Claude: send a GET request to `https://api.anthropic.com/api/oauth/usage`.
-  Read the existing OAuth access token from `~/.claude/.credentials.json` and add
-  `anthropic-beta: oauth-2025-04-20`. Store `five_hour` and `seven_day*`.
-  This is an internal CLI endpoint; the collector must be updated if it changes.
-- Codex: start the installed CLI's `app-server` over stdio, then send
-  `initialize` → `initialized` → `account/rateLimits/read`.
-  No threads or turns are created. Store each limit in `rateLimitsByLimitId`,
-  falling back to `rateLimits` on versions that do not support it.
-  Classify windows by `windowDurationMins`, since `primary` is not always 5h.
-- Neither collector sends inference requests. Missing usage values are not replaced with 0%.
-- Credentials, response bodies, prompts, and conversation history are never stored
-  in the DB or logs. Collection exceptions are recorded by type only;
-  HTTP / RPC errors are recorded by code only.
-- Default DB location: `data/history.sqlite3` in the script's directory.
-  Override it with `--db`.
-  Store the observation time in UTC epoch seconds, service, limit identifier,
-  window duration in minutes, usage percentage, and reset time.
-  Failures are also recorded in `observations`; a failure in one service does not
-  stop the other. Use WAL and transactions, with umask 0077 for new files.
-- Cached values are not recorded again as current observations. Each successful query is saved.
+- Claude sends a GET request to `https://api.anthropic.com/api/oauth/usage`,
+  using the existing OAuth access token from `~/.claude/.credentials.json` and
+  the `anthropic-beta: oauth-2025-04-20` header. It stores `five_hour` and
+  `seven_day*`. This is an internal CLI endpoint and may change.
+- Codex starts the installed CLI's app-server over stdio, then sends
+  `initialize` → `initialized` → `account/rateLimits/read`. It creates no threads
+  or turns. Limits come from `rateLimitsByLimitId`, with a fallback to
+  `rateLimits`, and are classified by `windowDurationMins`.
+- Missing usage values are not replaced with 0%. Credentials, response bodies,
+  prompts, and conversation history are never stored in the database or logs.
+  Collection exceptions are recorded by type only; HTTP and RPC errors by code.
+- The default database is `data/history.sqlite3`; override it with `--db`.
+  Observations contain UTC epoch time, service, limit identifier, window duration,
+  usage percentage, and reset time. Failures are also recorded, and a failure in
+  one service does not stop the other. New files use umask 0077. SQLite uses WAL
+  and transactions.
+- Cached values are not recorded again as current observations. Each successful
+  query is saved.
 
-This script does not refresh Claude tokens. Normal Claude Code use handles refreshes. If HTTP 401 errors persist, check Claude authentication
-on the collection host. Rate limiting (429), network failures, and expired credentials
-are recorded as failed observations; run `collect` again to retry.
-Schedule `collect` with a timer or cron job for periodic collection.
+This script does not refresh Claude tokens. Normal Claude Code use handles token
+refresh. If HTTP 401 errors persist, check authentication on the collection host.
+Rate limiting, network failures, and expired credentials are recorded as failed
+observations; a later `collect` retries them.
 
-## Commands (fish / bash)
+### Limit-history commands
 
 ```sh
-# Collect usage, or preview collection without executing it
+# fish / bash
 python3 ./agent_limit_history.py -q collect
 python3 ./agent_limit_history.py collect -n
-# Plot the last 14 days (the extension selects PNG / SVG / PDF)
 python3 ./agent_limit_history.py -q plot --days 14 --output /tmp/agent-limits.png
-# Open a window with zoom and pan controls (add --output to save it as well)
 python3 ./agent_limit_history.py -q plot --days 14 --show
-# Use an online backup instead of copying a live WAL database file on its own
 python3 ./agent_limit_history.py -q snapshot --output /tmp/agent-limits.sqlite3
-# Tests (standard library only)
-python3 -m unittest discover -s ./ -p agent_limit_history_test.py
 ```
 
-`--show` opens a window using matplotlib's TkAgg backend. Use the toolbar's magnifying
-glass to zoom, hand to pan, and home icon to reset the view. All four panels share
-axes, so adjusting one panel affects all four.
-The GUI backend requires tkinter (part of CPython; `python3-tk` on Debian-based systems).
-With `--show`, no file is written unless `--output` is explicitly provided.
-Do not use `--show` in headless environments without a display.
+`--show` opens a matplotlib TkAgg window with zoom and pan controls. All four
+panels share axes. It requires tkinter and a display; no file is written unless
+`--output` is also provided.
 
 The plot has four panels: Claude / Codex × 5h / weekly. Additional model-specific
-limits are plotted separately by identifier. The vertical axis shows usage (0–100%);
-the horizontal axis defaults to UTC (override with `--timezone`, for example `--timezone Europe/London`).
-Failed or missing observations become NaN. Lines break at observation gaps longer
-than 15 minutes and actual window transitions. Fractional-second jitter in reset
-times, or an unused window's expiry advancing with each query, does not count as
-a transition. Windows of unknown duration are stored in the DB but omitted from
-the four-panel plot.
+limits are plotted separately by identifier. The horizontal axis defaults to UTC
+and can be changed with `--timezone`. Failed or missing observations become NaN.
+Lines break at observation gaps longer than 15 minutes and at actual window
+transitions. Windows of unknown duration remain in the database but are omitted
+from the four-panel plot.
+
+## Tests
+
+```sh
+# Activity, waiting, and transcript tests require pytest; limit-history uses unittest.
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider --doctest-modules test_agent_activity.py waitall.py claude_turn_usage.py claude_plot_usage.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ./ -p agent_limit_history_test.py
+```
+
+Tests use synthetic databases, process directories, rollout records, and protocol
+responses. They do not require live agent sessions.
 
 ## License
 
