@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import io
+import json
 from pathlib import Path
 import shlex
 import sqlite3
@@ -77,6 +78,54 @@ class LimitHistoryTest(unittest.TestCase):
             with contextlib.closing(sqlite3.connect(output)) as conn:
                 self.assertEqual(conn.execute("SELECT count(*) FROM observations").fetchone()[0], 4)
                 self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+
+    def test_invalid_collector_results_are_recorded_and_do_not_stop_next_provider(self):
+        invalid_results = [
+            ({"observed_at": 123, "windows": [["five_hour", 300, None, 456]]}, "ValueError"),
+            ({"observed_at": None, "windows": [["five_hour", 300, 42, 456]]}, "ValueError"),
+            ({"observed_at": float("nan"), "windows": [["five_hour", 300, 42, 456]]}, "ValueError"),
+            ({"observed_at": 123, "windows": [["five_hour", 300, 42]]}, "ValueError"),
+            ({"observed_at": 123, "windows": [["five_hour", 300, 42, 456], ["seven_day", 10080, None, 456]]}, "ValueError"),
+            ({"windows": [["five_hour", 300, 42, 456]]}, "KeyError"),
+            ({"observed_at": 123}, "KeyError"),
+            ({"observed_at": 123, "windows": [["five_hour", 300, 42, 456],
+                                                  ["five_hour", 300, 43, 456]]}, "ValueError"),
+        ]
+        for result, error in invalid_results:
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as temp:
+                db = Path(temp) / "history.sqlite3"
+                args = argparse.Namespace(db=db, providers=["claude", "codex"], dry_run=False)
+                response = argparse.Namespace(stdout=json.dumps(result).encode(), returncode=0)
+                with patch.object(history.subprocess, "run", return_value=response), patch.object(
+                    history, "codex_snapshot", return_value={"observed_at": 124, "windows": [("codex", 10080, 50, 456)]}):
+                    self.assertEqual(history.collect(args), 1)
+                with contextlib.closing(sqlite3.connect(db)) as conn:
+                    self.assertEqual(conn.execute("SELECT provider, error FROM observations ORDER BY id").fetchall(),
+                                     [("claude", error), ("codex", None)])
+                    self.assertEqual(conn.execute("SELECT bucket, used_percent FROM windows").fetchall(),
+                                     [("codex", 50)])
+
+    def test_save_failure_rolls_back_and_next_provider_runs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "history.sqlite3"
+            args = argparse.Namespace(db=db, providers=["claude", "codex"], dry_run=False)
+            original_open_database = history.open_database
+
+            def open_database_with_rejecting_trigger(path):
+                conn = original_open_database(path)
+                conn.execute("CREATE TRIGGER reject_bad_window BEFORE INSERT ON windows WHEN NEW.bucket = 'bad' BEGIN SELECT RAISE(ABORT, 'rejected'); END")
+                return conn
+
+            response = argparse.Namespace(stdout=b'{"observed_at":123,"windows":[["good",300,42,456],["bad",10080,43,456]]}', returncode=0)
+            with patch.object(history, "open_database", side_effect=open_database_with_rejecting_trigger), patch.object(
+                history.subprocess, "run", return_value=response), patch.object(
+                history, "codex_snapshot", return_value={"observed_at": 124, "windows": [("codex", 10080, 50, 456)]}):
+                self.assertEqual(history.collect(args), 1)
+            with contextlib.closing(sqlite3.connect(db)) as conn:
+                self.assertEqual(conn.execute("SELECT provider, error FROM observations ORDER BY id").fetchall(),
+                                 [("claude", "IntegrityError"), ("codex", None)])
+                self.assertEqual(conn.execute("SELECT bucket, used_percent FROM windows").fetchall(),
+                                 [("codex", 50)])
 
     def test_codex_rpc_handshake(self):
         # A small peer asserts there is no thread/turn/inference request.

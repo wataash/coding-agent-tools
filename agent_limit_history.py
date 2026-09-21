@@ -187,6 +187,33 @@ def open_database(path):
     return conn
 
 
+def validate_collector_result(result):
+    """Return a collector observation after checking the storage protocol."""
+    if not isinstance(result, dict):
+        raise ValueError("collector result must be an object")
+    observed = number(result["observed_at"])
+    raw_rows = result["windows"]
+    if not isinstance(raw_rows, (list, tuple)) or not raw_rows:
+        raise ValueError("collector windows must be a nonempty array")
+
+    rows, keys = [], set()
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, (list, tuple)) or len(raw_row) != 4:
+            raise ValueError("invalid collector window")
+        bucket, minutes, used, reset = raw_row
+        if not isinstance(bucket, str) or not bucket:
+            raise ValueError("invalid collector bucket")
+        minutes = number(minutes)
+        if minutes <= 0 or int(minutes) != minutes:
+            raise ValueError("invalid window duration")
+        key = (bucket, int(minutes))
+        if key in keys:
+            raise ValueError("duplicate collector window")
+        keys.add(key)
+        rows.append((bucket, int(minutes), number(used), None if reset is None else number(reset)))
+    return observed, rows
+
+
 def collect(args):
     if args.dry_run:
         for provider in args.providers:
@@ -213,17 +240,29 @@ def collect(args):
                         raise RuntimeError(result["error"])
                     if response.returncode:
                         raise RuntimeError("Claude fetch exited " + str(response.returncode))
-                observed, rows = result["observed_at"], result["windows"]
+                observed, rows = validate_collector_result(result)
                 logger.info("%s: %s", provider, ", ".join(f"{r[0]} {r[1]}min {r[2]}%" for r in rows))
             except Exception as exc:
                 # Only explicitly constructed RuntimeError messages are safe to persist.
                 error = str(exc) if type(exc) is RuntimeError else type(exc).__name__
                 logger.error("%s: %s", provider, error)
                 failed = True
-            with conn:
-                obs_id = conn.execute("INSERT INTO observations(observed_at, provider, error) VALUES(?,?,?)",
-                                      (observed, provider, error)).lastrowid
-                conn.executemany("INSERT INTO windows VALUES(?,?,?,?,?)", [(obs_id, *row) for row in rows])
+            try:
+                with conn:
+                    obs_id = conn.execute("INSERT INTO observations(observed_at, provider, error) VALUES(?,?,?)",
+                                          (observed, provider, error)).lastrowid
+                    conn.executemany("INSERT INTO windows VALUES(?,?,?,?,?)", [(obs_id, *row) for row in rows])
+            except Exception as exc:
+                # The failed transaction has rolled back; database exceptions are not safe to persist verbatim.
+                error = type(exc).__name__
+                logger.error("%s: %s", provider, error)
+                failed = True
+                try:
+                    with conn:
+                        conn.execute("INSERT INTO observations(observed_at, provider, error) VALUES(?,?,?)",
+                                     (observed, provider, error))
+                except Exception as record_exc:
+                    logger.error("%s: unable to record failure: %s", provider, type(record_exc).__name__)
     finally:
         conn.close()
     return int(failed)

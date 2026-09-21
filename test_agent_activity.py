@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 
 import agent_activity as activity
@@ -47,6 +48,7 @@ def test_read_codex_log_running(tmp_path):
              'app-server event: turn/completed targeted_connections=1', None, 'pid:101:live'),
             (4, 103, 'codex_core', 'tool progress', 'aborted', 'pid:101:live'),
             (5, 104, 'codex_core', 'tool progress', 'dead', 'pid:102:dead'),
+            (6, 98, 'codex_core', 'tool progress', 'reused', 'pid:101:old-generation'),
         ])
     with sqlite3.connect(state_db) as connection:
         connection.execute(
@@ -58,6 +60,7 @@ def test_read_codex_log_running(tmp_path):
             'idle': ['task_started', 'task_complete'],
             'aborted': ['task_started', 'turn_aborted'],
             'dead': ['task_started'],
+            'reused': ['task_started'],
         }.items():
             rollout = tmp_path / f'{thread_id}.jsonl'
             rollout.write_text(''.join(
@@ -69,6 +72,10 @@ def test_read_codex_log_running(tmp_path):
     process_dir = proc_root / '101'
     process_dir.mkdir(parents=True)
     (process_dir / 'cmdline').write_bytes(b'/usr/bin/codex\0')
+    (proc_root / 'stat').write_text('btime 90\n')
+    # Start at 100.5 seconds: the valid log at 100 must not be rejected.
+    start_ticks = 10 * os.sysconf('SC_CLK_TCK') + os.sysconf('SC_CLK_TCK') // 2
+    (process_dir / 'stat').write_text(f'101 (codex (worker)) S ' + '0 ' * 18 + f'{start_ticks} 0\n')
     assert activity.read_codex_log_running(
         logs_db=logs_db, state_db=state_db, proc_root=proc_root,
     ) == [{
@@ -80,6 +87,14 @@ def test_read_codex_log_running(tmp_path):
         'status': {'type': 'active', 'activeFlags': []},
         'detection': 'rollout',
     }]
+
+    # PID 101 is reused again; no historical unfinished rollout is current.
+    (process_dir / 'stat').write_text(
+        '101 (codex) S ' + '0 ' * 18 + f'{20 * os.sysconf("SC_CLK_TCK")} 0\n',
+    )
+    assert activity.read_codex_log_running(
+        logs_db=logs_db, state_db=state_db, proc_root=proc_root,
+    ) == []
 
 
 

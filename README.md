@@ -64,8 +64,10 @@ raise exceptions instead of indicating that all work is finished.
 ### Activity detection
 
 - Codex CLI: map live Codex PIDs to thread IDs using `logs_2.sqlite`. Read each
-  thread's `rollout_path` from `state_5.sqlite`, then scan its JSONL history from
-  the end. `task_started` means running; `task_complete` and `turn_aborted` stop it.
+  process's start time from `/proc/` to exclude logs from earlier uses of its PID.
+  Read each thread's `rollout_path` from `state_5.sqlite`, then scan its JSONL
+  history from the end. `task_started` means running; `task_complete` and
+  `turn_aborted` stop it.
   Incomplete appended JSONL records are ignored.
 - Codex daemon: when its control socket exists, query `thread/list` through
   `codex app-server proxy`. Active sessions waiting on approval or user input are
@@ -149,6 +151,8 @@ protocol. `collect -n` prints commands without executing them or creating the DB
 - Missing usage values are not replaced with 0%. Credentials, response bodies,
   prompts, and conversation history are never stored in the database or logs.
   Collection exceptions are recorded by type only; HTTP and RPC errors by code.
+  Invalid collector observations are recorded as failures without partial window
+  rows, and collection continues with the next service.
 - The default database is `data/history.sqlite3`; override it with `--db`.
   Observations contain UTC epoch time, service, limit identifier, window duration,
   usage percentage, and reset time. Failures are also recorded, and a failure in

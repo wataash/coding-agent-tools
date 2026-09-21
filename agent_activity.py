@@ -125,12 +125,24 @@ def codex_process_pid(process_uuid: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def codex_process_is_live(pid: int, proc_root: Path = Path('/proc')) -> bool:
+def codex_process_is_live(pid: int, proc_root: Path = Path('/proc'), *, logged_at: int | None = None) -> bool:
     try:
         command = (proc_root / str(pid) / 'cmdline').read_bytes().split(b'\0', 1)[0]
+        if Path(os.fsdecode(command)).name != 'codex':
+            return False
+        if logged_at is None:
+            return True
+        # comm (field 2) can contain spaces and parentheses. starttime is field 22.
+        fields = (proc_root / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+        start_ticks = int(fields[19])
     except (FileNotFoundError, PermissionError, ProcessLookupError):
         return False
-    return Path(os.fsdecode(command)).name == 'codex'
+    for line in (proc_root / 'stat').read_text().splitlines():
+        if line.startswith('btime '):
+            started_at = int(line.split()[1]) + start_ticks / os.sysconf('SC_CLK_TCK')
+            # Logs store whole seconds; a log in the startup second is valid.
+            return logged_at >= int(started_at)
+    raise ValueError('process statistics lack boot time')
 
 
 def open_sqlite_read_only(path: Path) -> sqlite3.Connection:
@@ -205,7 +217,7 @@ def read_codex_log_running(*, logs_db: Path | None = None, state_db: Path | None
             for row in rows:
                 process_uuid = str(row['process_uuid'])
                 pid = codex_process_pid(process_uuid)
-                if pid is None or not codex_process_is_live(pid, proc_root):
+                if pid is None or not codex_process_is_live(pid, proc_root, logged_at=row['ts']):
                     continue
                 thread_id = str(row['thread_id'])
                 metadata = codex_thread_metadata(state_db, thread_id)
